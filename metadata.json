@@ -1,0 +1,11 @@
+{
+  "name": "EduTrack - Sistem Absensi Wajah & QR",
+  "description": "Platform absensi siswa dengan scan QR code, validasi wajah, geolokasi, dan dashboard pemantauan akademik.",
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
