@@ -12,11 +12,9 @@ export default function StudentDashboard({ onNavigate }: { onNavigate: (path: st
   const announcements = useStore(s => s.announcements);
   const grades = useStore(s => s.grades);
 
-  if (!currentUser) return null;
-
   const myAttendance = useMemo(() => {
-    return attendanceRecords.filter(r => r.studentId === currentUser.id);
-  }, [attendanceRecords, currentUser.id]);
+    return attendanceRecords.filter(r => r.studentId === currentUser?.id);
+  }, [attendanceRecords, currentUser?.id]);
 
   const stats = useMemo(() => {
     return {
@@ -28,8 +26,10 @@ export default function StudentDashboard({ onNavigate }: { onNavigate: (path: st
   }, [myAttendance]);
 
   const myGrades = useMemo(() => {
-    return grades.filter(g => g.studentId === currentUser.id).sort((a, b) => b.date - a.date);
-  }, [grades, currentUser.id]);
+    return grades.filter(g => g.studentId === currentUser?.id).sort((a, b) => b.date - a.date);
+  }, [grades, currentUser?.id]);
+
+  if (!currentUser) return null;
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans">

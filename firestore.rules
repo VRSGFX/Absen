@@ -1,0 +1,74 @@
+rules_version = '2';
+
+// Deploy with: firebase deploy --only firestore:rules
+// (requires firebase-tools + `firebase init firestore` once, pointing at
+// this project so firebase.json references this file)
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isSelf(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    function myProfile() {
+      return get(/databases/$(database)/documents/profiles/$(request.auth.uid)).data;
+    }
+
+    function isStaff() {
+      return signedIn() && myProfile().role in ['admin', 'teacher'];
+    }
+
+    // ---------------------------------------------------------------------
+    // profiles: public read (dashboard lookups, roster views), self-create
+    // on registration, staff-only status/role edits.
+    // ---------------------------------------------------------------------
+    match /profiles/{userId} {
+      allow read: if true;
+      allow create: if isSelf(userId);
+      allow update: if isStaff() || isSelf(userId);
+      allow delete: if false;
+    }
+
+    // ---------------------------------------------------------------------
+    // attendance_records: public read, students write their own check-ins,
+    // staff can write any (corrections).
+    // ---------------------------------------------------------------------
+    match /attendance_records/{recordId} {
+      allow read: if true;
+      allow create: if signedIn() && (isStaff() || request.resource.data.studentId == request.auth.uid);
+      allow update, delete: if isStaff();
+    }
+
+    // ---------------------------------------------------------------------
+    // announcements, grades, events: public read, staff-only write.
+    // ---------------------------------------------------------------------
+    match /announcements/{docId} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+
+    match /grades/{docId} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+
+    match /events/{docId} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+
+    // ---------------------------------------------------------------------
+    // qr_codes: public read (students validate codes client-side), staff
+    // generate/register/toggle/delete.
+    // ---------------------------------------------------------------------
+    match /qr_codes/{docId} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+  }
+}

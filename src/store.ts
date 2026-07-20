@@ -5,16 +5,32 @@ import {
   signInWithEmailAndPassword,
   signOut,
 } from 'firebase/auth';
+import {
+  addDoc,
+  deleteDoc,
+  doc,
+  getDoc,
+  onSnapshot,
+  orderBy,
+  query,
+  setDoc,
+  updateDoc,
+} from 'firebase/firestore';
 import { auth, nisnToSyntheticEmail } from './lib/firebase';
 import {
-  supabase,
-  type AnnouncementRow,
-  type AttendanceRow,
-  type EventRow,
-  type GradeRow,
-  type ProfileRow,
-  type QrCodeRow,
-} from './lib/supabase';
+  profilesCol,
+  attendanceCol,
+  announcementsCol,
+  gradesCol,
+  eventsCol,
+  qrCodesCol,
+  type ProfileDoc,
+  type AttendanceDoc,
+  type AnnouncementDoc,
+  type GradeDoc,
+  type EventDoc,
+  type QrCodeDoc,
+} from './lib/firestore';
 import {
   User,
   AttendanceRecord,
@@ -26,67 +42,67 @@ import {
 } from './types';
 
 // ---------------------------------------------------------------------------
-// Row (snake_case, Supabase) <-> App model (camelCase) mappers
+// Firestore doc (camelCase, includes `id`) <-> App model mappers
 // ---------------------------------------------------------------------------
-const profileToUser = (r: ProfileRow): User => ({
-  id: r.id,
-  nisn: r.nisn,
-  name: r.name,
-  email: r.email,
-  role: r.role,
-  creditScore: r.credit_score,
-  major: r.major ?? undefined,
-  classGrade: r.class_grade ?? undefined,
-  classType: (r.class_type as any) ?? undefined,
-  status: r.status,
+const profileToUser = (id: string, d: ProfileDoc): User => ({
+  id,
+  nisn: d.nisn,
+  name: d.name,
+  email: d.email,
+  role: d.role,
+  creditScore: d.creditScore,
+  major: d.major ?? undefined,
+  classGrade: d.classGrade ?? undefined,
+  classType: (d.classType as any) ?? undefined,
+  status: d.status,
 });
 
-const attendanceToApp = (r: AttendanceRow): AttendanceRecord => ({
-  id: r.id,
-  studentId: r.student_id,
-  date: r.date,
-  timestamp: r.timestamp,
-  status: r.status,
-  locationValid: r.location_valid,
-  faceValid: r.face_valid,
-  notes: r.notes ?? undefined,
+const attendanceToApp = (id: string, d: AttendanceDoc): AttendanceRecord => ({
+  id,
+  studentId: d.studentId,
+  date: d.date,
+  timestamp: d.timestamp,
+  status: d.status,
+  locationValid: d.locationValid,
+  faceValid: d.faceValid,
+  notes: d.notes ?? undefined,
 });
 
-const announcementToApp = (r: AnnouncementRow): Announcement => ({
-  id: r.id,
-  title: r.title,
-  content: r.content,
-  date: r.date,
-  authorId: r.author_id,
+const announcementToApp = (id: string, d: AnnouncementDoc): Announcement => ({
+  id,
+  title: d.title,
+  content: d.content,
+  date: d.date,
+  authorId: d.authorId,
 });
 
-const gradeToApp = (r: GradeRow): Grade => ({
-  id: r.id,
-  studentId: r.student_id,
-  subject: r.subject,
-  score: r.score,
-  date: r.date,
-  teacherId: r.teacher_id,
+const gradeToApp = (id: string, d: GradeDoc): Grade => ({
+  id,
+  studentId: d.studentId,
+  subject: d.subject,
+  score: d.score,
+  date: d.date,
+  teacherId: d.teacherId,
 });
 
-const eventToApp = (r: EventRow): SchoolEvent => ({
-  id: r.id,
-  title: r.title,
-  type: r.type,
-  date: r.date,
-  description: r.description ?? undefined,
+const eventToApp = (id: string, d: EventDoc): SchoolEvent => ({
+  id,
+  title: d.title,
+  type: d.type,
+  date: d.date,
+  description: d.description ?? undefined,
 });
 
-const qrToApp = (r: QrCodeRow): QrCodeEntry => ({
-  id: r.id,
-  code: r.code,
-  classGrade: r.class_grade ?? undefined,
-  major: r.major ?? undefined,
-  classType: (r.class_type as any) ?? undefined,
-  status: r.status,
-  registeredBy: r.registered_by ?? undefined,
-  isActive: r.is_active,
-  createdAt: new Date(r.created_at).getTime(),
+const qrToApp = (id: string, d: QrCodeDoc): QrCodeEntry => ({
+  id,
+  code: d.code,
+  classGrade: d.classGrade ?? undefined,
+  major: d.major ?? undefined,
+  classType: (d.classType as any) ?? undefined,
+  status: d.status,
+  registeredBy: d.registeredBy ?? undefined,
+  isActive: d.isActive,
+  createdAt: d.createdAt,
 });
 
 // ---------------------------------------------------------------------------
@@ -132,7 +148,7 @@ interface AppState {
   authReady: boolean;
   dataLoaded: boolean;
 
-  // Bootstrap: subscribes to Firebase auth state + loads Supabase data.
+  // Bootstrap: subscribes to Firebase auth state + live Firestore listeners.
   // Call once, e.g. in App.tsx's top-level useEffect.
   init: () => () => void;
 
@@ -179,62 +195,77 @@ export const useStore = create<AppState>()((set, get) => ({
   dataLoaded: false,
 
   init: () => {
-    // Load all public/shared collections from Supabase.
-    (async () => {
-      const [profilesRes, attendanceRes, annRes, gradesRes, eventsRes, qrRes] = await Promise.all([
-        supabase.from('profiles').select('*'),
-        supabase.from('attendance_records').select('*').order('timestamp', { ascending: false }),
-        supabase.from('announcements').select('*').order('date', { ascending: false }),
-        supabase.from('grades').select('*').order('date', { ascending: false }),
-        supabase.from('events').select('*'),
-        supabase.from('qr_codes').select('*').order('created_at', { ascending: false }),
-      ]);
+    // Live Firestore listeners for every collection. Each one keeps the
+    // store in sync in real time (no manual refetch needed after writes).
+    let loadedFlags = { profiles: false, attendance: false, ann: false, grades: false, events: false, qr: false };
+    const markLoaded = (key: keyof typeof loadedFlags) => {
+      loadedFlags[key] = true;
+      if (Object.values(loadedFlags).every(Boolean)) set({ dataLoaded: true });
+    };
 
-      set({
-        users: (profilesRes.data ?? []).map(profileToUser),
-        attendanceRecords: (attendanceRes.data ?? []).map(attendanceToApp),
-        announcements: (annRes.data ?? []).map(announcementToApp),
-        grades: (gradesRes.data ?? []).map(gradeToApp),
-        events: (eventsRes.data ?? []).map(eventToApp),
-        qrCodes: (qrRes.data ?? []).map(qrToApp),
-        dataLoaded: true,
-      });
-    })();
+    const unsubProfiles = onSnapshot(profilesCol, (snap) => {
+      set({ users: snap.docs.map((d) => profileToUser(d.id, d.data() as ProfileDoc)) });
+      markLoaded('profiles');
+    });
+
+    const unsubAttendance = onSnapshot(query(attendanceCol, orderBy('timestamp', 'desc')), (snap) => {
+      set({ attendanceRecords: snap.docs.map((d) => attendanceToApp(d.id, d.data() as AttendanceDoc)) });
+      markLoaded('attendance');
+    });
+
+    const unsubAnn = onSnapshot(query(announcementsCol, orderBy('date', 'desc')), (snap) => {
+      set({ announcements: snap.docs.map((d) => announcementToApp(d.id, d.data() as AnnouncementDoc)) });
+      markLoaded('ann');
+    });
+
+    const unsubGrades = onSnapshot(query(gradesCol, orderBy('date', 'desc')), (snap) => {
+      set({ grades: snap.docs.map((d) => gradeToApp(d.id, d.data() as GradeDoc)) });
+      markLoaded('grades');
+    });
+
+    const unsubEvents = onSnapshot(eventsCol, (snap) => {
+      set({ events: snap.docs.map((d) => eventToApp(d.id, d.data() as EventDoc)) });
+      markLoaded('events');
+    });
+
+    const unsubQr = onSnapshot(query(qrCodesCol, orderBy('createdAt', 'desc')), (snap) => {
+      set({ qrCodes: snap.docs.map((d) => qrToApp(d.id, d.data() as QrCodeDoc)) });
+      markLoaded('qr');
+    });
 
     // Restore session if the user was already logged in (Firebase persists
     // this across reloads automatically).
-    const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
+    const unsubAuth = onAuthStateChanged(auth, async (fbUser) => {
       if (!fbUser) {
         set({ currentUser: null, authReady: true });
         return;
       }
-      const { data } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', fbUser.uid)
-        .maybeSingle();
-
+      const snap = await getDoc(doc(profilesCol, fbUser.uid));
       set({
-        currentUser: data ? profileToUser(data as ProfileRow) : null,
+        currentUser: snap.exists() ? profileToUser(snap.id, snap.data() as ProfileDoc) : null,
         authReady: true,
       });
     });
 
-    return unsubscribe;
+    return () => {
+      unsubProfiles();
+      unsubAttendance();
+      unsubAnn();
+      unsubGrades();
+      unsubEvents();
+      unsubQr();
+      unsubAuth();
+    };
   },
 
   login: async (nisn, password) => {
     try {
       const email = nisnToSyntheticEmail(nisn);
       const cred = await signInWithEmailAndPassword(auth, email, password ?? '');
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', cred.user.uid)
-        .maybeSingle();
-      if (error || !data) return null;
+      const snap = await getDoc(doc(profilesCol, cred.user.uid));
+      if (!snap.exists()) return null;
 
-      const user = profileToUser(data as ProfileRow);
+      const user = profileToUser(snap.id, snap.data() as ProfileDoc);
       set({ currentUser: user });
       return user;
     } catch {
@@ -255,34 +286,33 @@ export const useStore = create<AppState>()((set, get) => ({
     // Teachers stay auto-approved (unchanged behavior).
     const status = userData.role === 'student' ? 'pending' : 'approved';
 
-    const row: ProfileRow = {
-      id: cred.user.uid,
+    const docData: ProfileDoc = {
       nisn: userData.nisn,
       name: userData.name,
       email: userData.email,
       role: userData.role,
-      credit_score: 100,
+      creditScore: 100,
       major: userData.major ?? null,
-      class_grade: userData.classGrade ?? null,
-      class_type: (userData.classType as any) ?? null,
+      classGrade: userData.classGrade ?? null,
+      classType: (userData.classType as any) ?? null,
       status,
     };
 
-    const { error } = await supabase.from('profiles').insert(row);
-    if (error) {
+    try {
+      await setDoc(doc(profilesCol, cred.user.uid), docData);
+    } catch (error) {
       // Roll back the Firebase account so it doesn't become orphaned.
       await cred.user.delete().catch(() => {});
       throw error;
     }
 
-    const newUser = profileToUser(row);
+    const newUser = profileToUser(cred.user.uid, docData);
     set((state) => ({ users: [...state.users, newUser], currentUser: newUser }));
     return newUser;
   },
 
   approveStudent: async (userId) => {
-    const { error } = await supabase.from('profiles').update({ status: 'approved' }).eq('id', userId);
-    if (error) return;
+    await updateDoc(doc(profilesCol, userId), { status: 'approved' });
     set((state) => ({
       users: state.users.map((u) => (u.id === userId ? { ...u, status: 'approved' } : u)),
       currentUser: state.currentUser?.id === userId ? { ...state.currentUser, status: 'approved' } : state.currentUser,
@@ -290,8 +320,7 @@ export const useStore = create<AppState>()((set, get) => ({
   },
 
   rejectStudent: async (userId) => {
-    const { error } = await supabase.from('profiles').update({ status: 'rejected' }).eq('id', userId);
-    if (error) return;
+    await updateDoc(doc(profilesCol, userId), { status: 'rejected' });
     set((state) => ({
       users: state.users.map((u) => (u.id === userId ? { ...u, status: 'rejected' } : u)),
       currentUser: state.currentUser?.id === userId ? { ...state.currentUser, status: 'rejected' } : state.currentUser,
@@ -299,50 +328,51 @@ export const useStore = create<AppState>()((set, get) => ({
   },
 
   generateQrCode: async () => {
-    // Try a few times in case of a rare code collision (unique constraint).
+    // Try a few times in case of a rare code collision.
     for (let attempt = 0; attempt < 5; attempt++) {
       const code = generateQrCodeText();
-      const { data, error } = await supabase
-        .from('qr_codes')
-        .insert({ code, status: 'unregistered', is_active: true })
-        .select()
-        .single();
-      if (!error && data) {
-        const entry = qrToApp(data as QrCodeRow);
-        set((state) => ({ qrCodes: [entry, ...state.qrCodes] }));
-        return entry;
-      }
+      const existing = get().qrCodes.find((q) => q.code === code);
+      if (existing) continue;
+
+      const docData: QrCodeDoc = {
+        code,
+        classGrade: null,
+        major: null,
+        classType: null,
+        status: 'unregistered',
+        registeredBy: null,
+        isActive: true,
+        createdAt: Date.now(),
+      };
+      const ref = await addDoc(qrCodesCol, docData);
+      const entry = qrToApp(ref.id, docData);
+      set((state) => ({ qrCodes: [entry, ...state.qrCodes] }));
+      return entry;
     }
     return null;
   },
 
   registerQrCode: async (id, info, registeredById) => {
-    const { data, error } = await supabase
-      .from('qr_codes')
-      .update({
-        class_grade: info.classGrade,
-        major: info.major,
-        class_type: info.classType,
-        status: 'registered',
-        registered_by: registeredById,
-      })
-      .eq('id', id)
-      .select()
-      .single();
-    if (error || !data) return;
-    const updated = qrToApp(data as QrCodeRow);
-    set((state) => ({ qrCodes: state.qrCodes.map((q) => (q.id === id ? updated : q)) }));
+    const updates = {
+      classGrade: info.classGrade,
+      major: info.major,
+      classType: info.classType,
+      status: 'registered' as const,
+      registeredBy: registeredById,
+    };
+    await updateDoc(doc(qrCodesCol, id), updates);
+    set((state) => ({
+      qrCodes: state.qrCodes.map((q) => (q.id === id ? { ...q, ...updates, registeredBy: registeredById } : q)),
+    }));
   },
 
   toggleQrCodeActive: async (id, isActive) => {
-    const { error } = await supabase.from('qr_codes').update({ is_active: isActive }).eq('id', id);
-    if (error) return;
+    await updateDoc(doc(qrCodesCol, id), { isActive });
     set((state) => ({ qrCodes: state.qrCodes.map((q) => (q.id === id ? { ...q, isActive } : q)) }));
   },
 
   deleteQrCode: async (id) => {
-    const { error } = await supabase.from('qr_codes').delete().eq('id', id);
-    if (error) return;
+    await deleteDoc(doc(qrCodesCol, id));
     set((state) => ({ qrCodes: state.qrCodes.filter((q) => q.id !== id) }));
   },
 
@@ -359,22 +389,17 @@ export const useStore = create<AppState>()((set, get) => ({
     if (existing) return; // Already checked in today
 
     const timestamp = Date.now();
-    const row: Omit<AttendanceRow, 'id'> = {
-      student_id: record.studentId,
+    const docData: AttendanceDoc = {
+      studentId: record.studentId,
       date: record.date,
       timestamp,
       status: record.status,
-      location_valid: record.locationValid,
-      face_valid: record.faceValid,
+      locationValid: record.locationValid,
+      faceValid: record.faceValid,
       notes: record.notes ?? null,
     };
 
-    const { data, error } = await supabase
-      .from('attendance_records')
-      .insert(row)
-      .select()
-      .single();
-    if (error || !data) return;
+    const ref = await addDoc(attendanceCol, docData);
 
     let scoreChange = 0;
     if (record.status === 'alpha') scoreChange = -5;
@@ -382,7 +407,7 @@ export const useStore = create<AppState>()((set, get) => ({
     else if (record.status === 'hadir') scoreChange = 1;
 
     set((state) => ({
-      attendanceRecords: [attendanceToApp(data as AttendanceRow), ...state.attendanceRecords],
+      attendanceRecords: [attendanceToApp(ref.id, docData), ...state.attendanceRecords],
     }));
 
     if (scoreChange !== 0) {
@@ -391,32 +416,29 @@ export const useStore = create<AppState>()((set, get) => ({
   },
 
   addAnnouncement: async (ann) => {
-    const row = { title: ann.title, content: ann.content, date: Date.now(), author_id: ann.authorId };
-    const { data, error } = await supabase.from('announcements').insert(row).select().single();
-    if (error || !data) return;
+    const docData: AnnouncementDoc = { title: ann.title, content: ann.content, date: Date.now(), authorId: ann.authorId };
+    const ref = await addDoc(announcementsCol, docData);
     set((state) => ({
-      announcements: [announcementToApp(data as AnnouncementRow), ...state.announcements],
+      announcements: [announcementToApp(ref.id, docData), ...state.announcements],
     }));
   },
 
   addEvent: async (event) => {
-    const row = { title: event.title, type: event.type, date: event.date, description: event.description ?? null };
-    const { data, error } = await supabase.from('events').insert(row).select().single();
-    if (error || !data) return;
-    set((state) => ({ events: [eventToApp(data as EventRow), ...state.events] }));
+    const docData: EventDoc = { title: event.title, type: event.type, date: event.date, description: event.description ?? null };
+    const ref = await addDoc(eventsCol, docData);
+    set((state) => ({ events: [eventToApp(ref.id, docData), ...state.events] }));
   },
 
   addGrade: async (grade) => {
-    const row = {
-      student_id: grade.studentId,
+    const docData: GradeDoc = {
+      studentId: grade.studentId,
       subject: grade.subject,
       score: grade.score,
       date: Date.now(),
-      teacher_id: grade.teacherId,
+      teacherId: grade.teacherId,
     };
-    const { data, error } = await supabase.from('grades').insert(row).select().single();
-    if (error || !data) return;
-    set((state) => ({ grades: [gradeToApp(data as GradeRow), ...state.grades] }));
+    const ref = await addDoc(gradesCol, docData);
+    set((state) => ({ grades: [gradeToApp(ref.id, docData), ...state.grades] }));
   },
 
   updateCreditScore: async (studentId, change) => {
@@ -424,11 +446,7 @@ export const useStore = create<AppState>()((set, get) => ({
     if (!current) return;
     const newScore = Math.min(100, Math.max(0, current.creditScore + change));
 
-    const { error } = await supabase
-      .from('profiles')
-      .update({ credit_score: newScore })
-      .eq('id', studentId);
-    if (error) return;
+    await updateDoc(doc(profilesCol, studentId), { creditScore: newScore });
 
     set((state) => ({
       users: state.users.map((u) => (u.id === studentId ? { ...u, creditScore: newScore } : u)),

@@ -1,10 +1,12 @@
 // src/lib/firebase.ts
-// Firebase is used ONLY for Authentication in this project.
-// All application data (profiles, attendance, grades, announcements, events)
-// lives in Supabase — see src/lib/supabase.ts
+// Firebase is used for BOTH Authentication and application data.
+// All application data (profiles, attendance, grades, announcements,
+// events, qr codes) lives in Firestore — see src/lib/firestore.ts for
+// collection names and document shapes.
 
 import { initializeApp, getApps, type FirebaseApp } from 'firebase/app';
 import { getAuth, type Auth } from 'firebase/auth';
+import { getFirestore, type Firestore } from 'firebase/firestore';
 
 // Hardcoded fallback so the app still works even if the hosting
 // environment doesn't pick up .env.local (e.g. some AI Studio preview
@@ -36,6 +38,7 @@ export const firebaseApp: FirebaseApp = getApps().length
   : initializeApp(firebaseConfig);
 
 export const auth: Auth = getAuth(firebaseApp);
+export const db: Firestore = getFirestore(firebaseApp);
 
 /**
  * EduTrack logs users in with NISN/NIP instead of email.
